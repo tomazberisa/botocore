@@ -104,7 +104,6 @@ which don't represent the actual service api.
 import os
 import logging
 
-from botocore import BOTOCORE_ROOT
 from botocore.compat import json
 from botocore.compat import OrderedDict
 from botocore.exceptions import DataNotFoundError, UnknownServiceError
@@ -198,6 +197,64 @@ def create_loader(search_path_string=None):
         paths.append(path)
     return Loader(extra_search_paths=paths)
 
+import importlib
+
+try:
+    import importlib.resources
+    # Defeat lazy module importers.
+    importlib.resources.open_binary
+    HAVE_RESOURCE_READER = True
+except ImportError:
+    HAVE_RESOURCE_READER = False
+
+try:
+    import pkg_resources
+    # Defeat lazy module importers.
+    pkg_resources.resource_stream
+    HAVE_PKG_RESOURCES = True
+except ImportError:
+    HAVE_PKG_RESOURCES = False
+
+
+def get_resource(package, resource):
+    """Return a file handle on a named resource in a Package."""
+
+    # Prefer ResourceReader APIs, as they are newest.
+    if HAVE_RESOURCE_READER:
+        # If we're in the context of a module, we could also use
+        # ``__loader__.get_resource_reader(__name__).open_resource(resource)``.
+        # We use open_binary() because it is simple.
+        return importlib.resources.open_binary(package, resource)
+
+    # Fall back to pkg_resources.
+    if HAVE_PKG_RESOURCES:
+        return pkg_resources.resource_stream(package, resource)
+
+    # Fall back to __file__.
+
+    # We need to first import the package so we can find its location.
+    # This could raise an exception!
+    mod = importlib.import_module(package)
+
+    # Undefined __file__ will raise NameError on variable access.
+    try:
+        package_path = os.path.abspath(os.path.dirname(mod.__file__))
+    except NameError:
+        package_path = None
+
+    if package_path is not None:
+        # Warning: there is a path traversal attack possible here if
+        # resource contains values like ../../../../etc/password. Input
+        # must be trusted or sanitized before blindly opening files or
+        # you may have a security vulnerability!
+        resource_path = os.path.join(package_path, resource)
+
+        return open(resource_path, 'rb')
+
+    # Could not resolve package path from __file__.
+    raise Exception('do not know how to load resource: %s:%s' % (
+                    package, resource))
+
 
 class Loader(object):
     """Find and load data models.
@@ -210,7 +267,7 @@ class Loader(object):
     """
     FILE_LOADER_CLASS = JSONFileLoader
     # The included models in botocore/data/ that we ship with botocore.
-    BUILTIN_DATA_PATH = os.path.join(BOTOCORE_ROOT, 'data')
+    BUILTIN_DATA_PATH = get_resource('botocore', 'data')
     # For convenience we automatically add ~/.aws/models to the data path.
     CUSTOMER_DATA_PATH = os.path.join(os.path.expanduser('~'),
                                       '.aws', 'models')
